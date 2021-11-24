@@ -28,8 +28,7 @@ import (
 	"github.com/redhat-cop/cert-utils-operator/controllers/secrettokeystore"
 	outils "github.com/redhat-cop/operator-utils/pkg/util"
 
-	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
-	// to ensure that exec-entrypoint and run can make use of them.
+	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
 	routev1 "github.com/openshift/api/route/v1"
 	crd "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -37,6 +36,8 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/discovery"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
+	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	apiregistrationv1 "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -55,6 +56,7 @@ func init() {
 	utilruntime.Must(routev1.AddToScheme(scheme))
 	utilruntime.Must(crd.AddToScheme(scheme))
 	utilruntime.Must(apiregistrationv1.AddToScheme(scheme))
+	utilruntime.Must(cmapi.AddToScheme(scheme))
 
 	// +kubebuilder:scaffold:scheme
 }
@@ -170,11 +172,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	discoveryClient := discovery.NewDiscoveryClientForConfigOrDie(mgr.GetConfig())
+
 	if res, err := outils.IsGVKDefined(schema.GroupVersionKind{
 		Group:   "route.openshift.io",
 		Version: "v1",
 		Kind:    "Route",
-	}, discovery.NewDiscoveryClientForConfigOrDie(mgr.GetConfig())); err == nil && res != nil {
+	}, discoveryClient); err == nil && res != nil {
 		if err = (&route.RouteCertificateReconciler{
 			ReconcilerBase: outils.NewFromManager(mgr, mgr.GetEventRecorderFor("route_certificate_controller")),
 			Log:            ctrl.Log.WithName("controllers").WithName("route_certificate_controller"),
@@ -182,6 +186,22 @@ func main() {
 			setupLog.Error(err, "unable to create controller", "controller", "route_certificate_controller")
 			os.Exit(1)
 		}
+	}
+
+	if res, err := outils.IsGVKDefined(schema.GroupVersionKind{
+		Group:   "cert-manager.io",
+		Version: "v1",
+		Kind:    "CertificateRequest",
+	}, discoveryClient); err == nil && res != nil {
+		if err = (&route.CertificateRequestReconciler{
+			ReconcilerBase: outils.NewFromManager(mgr, mgr.GetEventRecorderFor("route_certificaterequest_controller")),
+			Log:            ctrl.Log.WithName("controllers").WithName("route_certificaterequest_controller"),
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "route_certificaterequest_controller")
+			os.Exit(1)
+		}
+	} else {
+		setupLog.Info("Not enabling cert-manager CertificateRequest support as the CRDs do not appear to be installed.")
 	}
 
 	// +kubebuilder:scaffold:builder

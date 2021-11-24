@@ -1,13 +1,30 @@
+/*
+Copyright 2021 Jetstack Ltd.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+// Package route contains controllers that help configure TLS on OpenShift.
 package route
 
 import (
-	"bytes"
 	"context"
 	"crypto"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"k8s.io/apimachinery/pkg/labels"
 	"sort"
 	"time"
 
@@ -23,97 +40,61 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 )
 
+// CertificateRequestReconciler is a controller that creates cert-manager CertificateRequests
+// when it sees a route that contains cert-manager.io/issuer-name and cert-manager.io/issuer-kind
+// annotations.
+//
+// After the CertificateRequests have been signed, it updates the Route.Spec.TLSConfig block with
+// the generated private key and signed certificate. If the cert-manager Issuer supports sending relevant
+// CAs, it will also overwrite the TLSConfig.CA Certificate.
+//
+// The controller will renew the Certificate after 2/3 of the duration of the signed certificate passes.
 type CertificateRequestReconciler struct {
 	outils.ReconcilerBase
-	Log            logr.Logger
-	controllerName string
+	Log logr.Logger
 }
 
 func (c *CertificateRequestReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	c.controllerName = "route_certificaterequest_controller"
-
-	isCertManagerRoute := predicate.Funcs{
-		CreateFunc: func(e event.CreateEvent) bool {
-			route, ok := e.Object.DeepCopyObject().(*routev1.Route)
+	isCertManagerRoute := predicate.NewPredicateFuncs(
+		func(object client.Object) bool {
+			route, ok := object.(*routev1.Route)
 			if !ok {
 				return false
 			}
 			return hasCertManagerAnnotations(route)
 		},
-		DeleteFunc: func(e event.DeleteEvent) bool {
-			route, ok := e.Object.DeepCopyObject().(*routev1.Route)
-			if !ok {
-				return false
-			}
-			return hasCertManagerAnnotations(route)
-		},
-		UpdateFunc: func(e event.UpdateEvent) bool {
-			newRoute, ok := e.ObjectNew.DeepCopyObject().(*routev1.Route)
-			if !ok {
-				return false
-			}
-			return hasCertManagerAnnotations(newRoute)
-		},
-		GenericFunc: func(e event.GenericEvent) bool {
-			return false
-		},
-	}
+	)
 
-	hasCRStatusChanged := predicate.Funcs{
-		CreateFunc: func(e event.CreateEvent) bool {
-			_, ok := e.Object.(*cmapi.CertificateRequest)
-			return ok
-		},
-		UpdateFunc: func(e event.UpdateEvent) bool {
-			crOld, ok := e.ObjectOld.(*cmapi.CertificateRequest)
+	// Only process CRs that have been approved or denied
+	shouldProcessCR := predicate.NewPredicateFuncs(
+		func(object client.Object) bool {
+			cr, ok := object.(*cmapi.CertificateRequest)
 			if !ok {
 				return false
 			}
-			crNew, ok := e.ObjectNew.(*cmapi.CertificateRequest)
-			if !ok {
-				return false
-			}
-			oldConditions := make(map[cmapi.CertificateRequestConditionType]cmapi.CertificateRequestCondition)
-			for _, oldCon := range crOld.Status.Conditions {
-				oldConditions[oldCon.Type] = oldCon
-			}
-			for _, newCon := range crNew.Status.Conditions {
-				oldCon, found := oldConditions[newCon.Type]
-				if !found {
-					return true
-				}
-				if oldCon.Status != newCon.Status {
-					return true
-				}
-			}
-			return !bytes.Equal(crOld.Status.Certificate, crNew.Status.Certificate)
+			return cmutil.CertificateRequestIsApproved(cr) || cmutil.CertificateRequestIsDenied(cr)
 		},
-		DeleteFunc: func(e event.DeleteEvent) bool {
-			_, ok := e.Object.(*cmapi.CertificateRequest)
-			return ok
-		},
-	}
+	)
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&routev1.Route{
 			TypeMeta: metav1.TypeMeta{Kind: "Route"},
 		}, builder.WithPredicates(isCertManagerRoute)).
 		// We will create cert-manager CertificateRequests to populate TLS routes, so
-		// we need to respond to the creation / update events them too.
+		// we need to respond to the creation / update events for them too.
 		Watches(&source.Kind{
 			Type: &cmapi.CertificateRequest{
 				TypeMeta: metav1.TypeMeta{Kind: "CertificateRequest"},
 			},
 		}, &handler.EnqueueRequestForOwner{
 			OwnerType: &routev1.Route{},
-		}, builder.WithPredicates(hasCRStatusChanged)).
+		}, builder.WithPredicates(shouldProcessCR)).
 		Complete(c)
 }
 
@@ -130,6 +111,9 @@ func (c *CertificateRequestReconciler) Reconcile(ctx context.Context, req reconc
 	// but the TLS block could be missing / unset so set a default.
 	if instance.Spec.TLS == nil {
 		instance.Spec.TLS = &routev1.TLSConfig{
+			// If no TLS Config was specified, use Edge. This controller
+			// is not responsible for destinationCA, so reencrypt doesn't
+			// make sense. If a user knows they want reencrypt, they can set it themselves.
 			Termination: routev1.TLSTerminationEdge,
 		}
 	}
@@ -193,7 +177,7 @@ func (c *CertificateRequestReconciler) Reconcile(ctx context.Context, req reconc
 		}
 		return c.ManageSuccess(ctx, instance)
 	}
-	// Is the Private Key malformed?
+	// Is the Private Key malformed? If so, delete it and re-reconcile.
 	pk, err := cmutilpki.DecodePrivateKeyBytes([]byte(nextPrivateKeyPEM))
 	if err != nil {
 		log.V(5).Error(err, "next private key annotation doesn't contain a valid key")
@@ -207,11 +191,18 @@ func (c *CertificateRequestReconciler) Reconcile(ctx context.Context, req reconc
 
 	// We have a private key. Look for matching CertificateRequests
 	certificateRequests := &cmapi.CertificateRequestList{}
-	err = c.GetClient().List(ctx, certificateRequests, client.InNamespace(instance.Namespace))
+	err = c.GetClient().List(
+		ctx,
+		certificateRequests,
+		client.InNamespace(instance.Namespace),
+		client.MatchingLabelsSelector{
+			Selector: labels.Set{"owning-route-name": instance.Name}.AsSelector(),
+		},
+	)
 	if err != nil {
 		return c.ManageError(ctx, instance, err)
 	}
-	// only consider CertificateRequests that match the private key and are owned by this route
+	// only consider CertificateRequests that match the private key
 	var ownedCRs []*cmapi.CertificateRequest
 	for _, cr := range certificateRequests.Items {
 		x509CR, err := x509.ParseCertificateRequest(cr.Spec.Request)
@@ -220,12 +211,8 @@ func (c *CertificateRequestReconciler) Reconcile(ctx context.Context, req reconc
 		}
 		matches, err := cmutilpki.PublicKeyMatchesCSR(pk.Public(), x509CR)
 		if matches && err == nil {
-			for _, or := range cr.OwnerReferences {
-				if or.Kind == "Route" && or.Name == instance.Name {
-					ownedCRs = append(ownedCRs, cr.DeepCopy())
-					break
-				}
-			}
+			ownedCRs = append(ownedCRs, cr.DeepCopy())
+			break
 		}
 	}
 	// only consider the most recent CR
@@ -272,8 +259,8 @@ func (c *CertificateRequestReconciler) Reconcile(ctx context.Context, req reconc
 		return c.ManageSuccess(ctx, instance)
 	// CR is ready. Copy the cert/ca into the route.
 	case cmutil.CertificateRequestHasCondition(ownedCRs[0], cmapi.CertificateRequestCondition{
-		Type:               cmapi.CertificateRequestConditionReady,
-		Status:             "True",
+		Type:   cmapi.CertificateRequestConditionReady,
+		Status: "True",
 	}):
 		instance.Spec.TLS.Key = nextPrivateKeyPEM
 		delete(instance.Annotations, cmapi.IsNextPrivateKeySecretLabelKey)
@@ -334,12 +321,6 @@ func (c *CertificateRequestReconciler) certificateRequestFromRoute(route *routev
 		issuerRef.Group = issuerGroup
 	} else {
 		issuerRef.Group = cmapi.SchemeGroupVersion.Group
-	}
-	groupName, hasGroup := route.GetAnnotations()[cmapi.IssuerGroupAnnotationKey]
-	if hasGroup {
-		issuerRef.Group = groupName
-	} else {
-		issuerRef.Group = "cert-manager.io"
 	}
 
 	return &cmapi.CertificateRequest{

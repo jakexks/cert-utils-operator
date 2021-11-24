@@ -198,6 +198,11 @@ func (c *CertificateRequestReconciler) Reconcile(ctx context.Context, req reconc
 	if err != nil {
 		log.V(5).Error(err, "next private key annotation doesn't contain a valid key")
 		delete(instance.GetAnnotations(), cmapi.IsNextPrivateKeySecretLabelKey)
+		err = c.GetClient().Update(ctx, instance)
+		if err != nil {
+			return c.ManageError(ctx, instance, err)
+		}
+		return c.ManageSuccess(ctx, instance)
 	}
 
 	// We have a private key. Look for matching CertificateRequests
@@ -240,7 +245,7 @@ func (c *CertificateRequestReconciler) Reconcile(ctx context.Context, req reconc
 		if err != nil {
 			return c.ManageError(ctx, instance, err)
 		}
-
+		return c.ManageSuccess(ctx, instance)
 	// CR has been explicitly denied. Not much we can do here.
 	case cmutil.CertificateRequestIsDenied(ownedCRs[0]):
 		log.Info("Not updating route as Certificate Request has been explicitly denied")
@@ -285,8 +290,6 @@ func (c *CertificateRequestReconciler) Reconcile(ctx context.Context, req reconc
 	default:
 		return c.ManageSuccess(ctx, instance)
 	}
-
-	return reconcile.Result{}, nil
 }
 
 // hasCertManagerAnnotations is used in a predicate for our controller-runtime

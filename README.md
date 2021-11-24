@@ -15,7 +15,7 @@ By convention this type of secrets have three optional entries:
 
 The functionalities are the following:
 
-1. [Ability to populate route certificates](#Populating-route-certificates)
+1. [Ability to populate route certificates from secrets](#Populating-route-certificates-from-secrets)
 2. [Ability to create java keystore and truststore from the certificates](#Creating-java-keystore-and-truststore)
 3. [Ability to show info regarding the certificates](#Showing-info-on-the-certificates)
 4. [Ability to alert when a certificate is about to expire](#Alerting-when-a-certificate-is-about-to-expire)
@@ -23,7 +23,7 @@ The functionalities are the following:
 
 All these feature are activated via opt-in annotations.
 
-## Populating route certificates
+## Populating route certificates from secrets
 
 This feature works on [secure routes](https://docs.openshift.com/container-platform/3.11/architecture/networking/routes.html#secured-routes) with `edge` or `reencrypt` type of termination.
 
@@ -42,6 +42,31 @@ The `destinationCACertificate` can also be injected. To activate this feature us
 1. `destinationCACertificate` with the content of `ca.crt`.
 
 Note that the two annotations can point to different secrets.
+
+## Populating route certificates using cert-manager
+
+This feature works on [secure routes](https://docs.openshift.com/container-platform/3.11/architecture/networking/routes.html#secured-routes) with `edge` type of termination by itself, or `reencrypt`
+when combined with the `destinationCACertificate` annotation from above.
+
+If you are already using cert-manager for certificate lifecycle management
+in your namespace, cert-utils-operator can manage the TLS configuration of your route for you,
+issuing certificates on-demand and renewing them before they expire automatically.
+
+This feature is activated by annotating a route with `cert-manager.io/issuer-name` and `cert-manager.io/issuer-kind` annoations.
+You can also use [external issuers](https://cert-manager.io/docs/configuration/external/) by using the `cert-manager.io/issuer-group` annotation.
+
+An example route could look like this:
+
+```yaml
+apiVersion: v1
+kind: Route
+metadata:
+  name: frontend
+  namespace: frontend-app
+  annotations:
+    cert-manager.io/issuer-name: letsencrypt-staging
+    cert-manager.io/issuer-kind: ClusterIssuer
+```
 
 ## Creating java keystore and truststore
 

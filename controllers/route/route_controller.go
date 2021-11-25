@@ -130,9 +130,9 @@ func (r *RouteCertificateReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			TypeMeta: v1.TypeMeta{
 				Kind: "Secret",
 			},
-		}}, &enqueueRequestForReferecingRoutes{
+		}}, &enqueueRequestForReferencingRoutes{
 			Client: mgr.GetClient(),
-			log:    ctrl.Log.WithName("enqueueRequestForReferecingRoutes"),
+			log:    ctrl.Log.WithName("enqueueRequestForReferencingRoutes"),
 		}, builder.WithPredicates(isContentChanged)).
 		Complete(r)
 }
@@ -187,7 +187,7 @@ func (r *RouteCertificateReconciler) Reconcile(context context.Context, req ctrl
 			log.Error(err, "unable to find referenced secret", "secret", secretName)
 			return r.ManageError(context, instance, err)
 		}
-		shouldUpdate = shouldUpdate || populateRouteWithCertifcates(instance, secret)
+		shouldUpdate = shouldUpdate || populateRouteWithCertificates(instance, secret)
 	}
 	if !okca {
 		if instance.Spec.TLS.DestinationCACertificate != "" {
@@ -215,13 +215,13 @@ func (r *RouteCertificateReconciler) Reconcile(context context.Context, req ctrl
 		}
 	}
 
-	// if we are here we know it's because a route was create/modified or its referenced secret was created/modified
-	// therefore the only think we need to do is to update the route certificates
+	// if we are here we know it's because a route was created/modified or its referenced secret was created/modified
+	// therefore the only thing we need to do is to update the route certificates
 
 	return r.ManageSuccess(context, instance)
 }
 
-func (e *enqueueRequestForReferecingRoutes) matchSecret(c client.Client, secret types.NamespacedName) ([]routev1.Route, error) {
+func (e *enqueueRequestForReferencingRoutes) matchSecret(c client.Client, secret types.NamespacedName) ([]routev1.Route, error) {
 	routeList := &routev1.RouteList{}
 	err := c.List(context.TODO(), routeList, &client.ListOptions{
 		Namespace: secret.Namespace,
@@ -244,13 +244,13 @@ func (e *enqueueRequestForReferecingRoutes) matchSecret(c client.Client, secret 
 	return result, nil
 }
 
-type enqueueRequestForReferecingRoutes struct {
+type enqueueRequestForReferencingRoutes struct {
 	client.Client
 	log logr.Logger
 }
 
-// trigger a router reconcile event for those routes that reference this secret
-func (e *enqueueRequestForReferecingRoutes) Create(evt event.CreateEvent, q workqueue.RateLimitingInterface) {
+// Create will trigger a reconcile event for those routes that reference this secret
+func (e *enqueueRequestForReferencingRoutes) Create(evt event.CreateEvent, q workqueue.RateLimitingInterface) {
 	routes, _ := e.matchSecret(e.Client, types.NamespacedName{
 		Name:      evt.Object.GetName(),
 		Namespace: evt.Object.GetNamespace(),
@@ -265,7 +265,7 @@ func (e *enqueueRequestForReferecingRoutes) Create(evt event.CreateEvent, q work
 
 // Update implements EventHandler
 // trigger a router reconcile event for those routes that reference this secret
-func (e *enqueueRequestForReferecingRoutes) Update(evt event.UpdateEvent, q workqueue.RateLimitingInterface) {
+func (e *enqueueRequestForReferencingRoutes) Update(evt event.UpdateEvent, q workqueue.RateLimitingInterface) {
 	routes, _ := e.matchSecret(e.Client, types.NamespacedName{
 		Name:      evt.ObjectNew.GetName(),
 		Namespace: evt.ObjectNew.GetNamespace(),
@@ -279,19 +279,19 @@ func (e *enqueueRequestForReferecingRoutes) Update(evt event.UpdateEvent, q work
 }
 
 // Delete implements EventHandler
-func (e *enqueueRequestForReferecingRoutes) Delete(evt event.DeleteEvent, q workqueue.RateLimitingInterface) {
+func (e *enqueueRequestForReferencingRoutes) Delete(evt event.DeleteEvent, q workqueue.RateLimitingInterface) {
 	return
 }
 
 // Generic implements EventHandler
-func (e *enqueueRequestForReferecingRoutes) Generic(evt event.GenericEvent, q workqueue.RateLimitingInterface) {
+func (e *enqueueRequestForReferencingRoutes) Generic(evt event.GenericEvent, q workqueue.RateLimitingInterface) {
 	return
 }
 
-func populateRouteWithCertifcates(route *routev1.Route, secret *corev1.Secret) bool {
+func populateRouteWithCertificates(route *routev1.Route, secret *corev1.Secret) bool {
 	shouldUpdate := false
 	if route.Spec.TLS.Termination == "edge" || route.Spec.TLS.Termination == "reencrypt" {
-		// here we need to replace the terminating certifciate
+		// here we need to replace the terminating certificate
 		if value, ok := secret.Data[util.Key]; ok && len(value) != 0 {
 			if route.Spec.TLS.Key != string(value) {
 				route.Spec.TLS.Key = string(value)
